@@ -1,0 +1,172 @@
+#!/usr/bin/env python
+
+import os, sys
+import paramiko
+import argparse
+import logging
+import socket
+
+# port: service name
+# TODO: find a more elegant way to do this (puppet facts?)
+services = {
+    80: "apache2",
+    631: "cups",
+    3306: "mysql",
+    6379: "redis-server",
+    25: "exim4"
+}
+
+class CommaSeperatedListOfInt(argparse.Action):
+    """
+    Converts an arg in the form of foo,bar to set([foo, bar])
+    """
+    def __call__(self, parser, namespace, values, option_string=None):
+        if not hasattr(namespace, self.dest):
+            setattr(namespace, self.dest, set())
+
+        for opt in values.split(','):
+            getattr(namespace, self.dest).add(int(opt))
+
+class PortSupervisor(object):
+    def __init__(self, ip, ports, noop, logger):
+        self.ip = ip
+        self.ports = ports
+        self.noop = noop
+        self.logger = logger
+
+    def check_port(self, port):
+        """
+        Attempts a connection to a port. Returns True for a succesful connection
+        """
+        self.logger.info("Checking port %d", port)
+        s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        s.settimeout(2)
+        port_alive = True
+        try:
+            s.connect((self.ip, port))
+        except (socket.error, socket.timeout):
+            port_alive = False
+        finally:
+            s.close()
+
+        if port_alive:
+            self.logger.info("port %d is alive", port)
+        else:
+            self.logger.info("port %d is down", port)
+
+        return port_alive
+
+    def restart_service(self, service_name):
+        """
+        Restarts a service
+        """
+        ssh = paramiko.client.SSHClient()
+        ssh.load_system_host_keys()
+        ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+        # TODO: support alternate user
+        ssh.connect(self.ip, username='root')
+        self.logger.info("attempting to restart service %s", service_name)
+        try:
+            stdin, stdout, stderr = ssh.exec_command('service {0} restart'.format(service_name))
+        except paramiko.SSHException:
+            self.logger.error("failed to restart {0}".format(service_name))
+
+        if stdout.channel.recv_exit_status() != 0:
+            self.logger.error("failed to restart {0}".format(service_name))
+        # TODO change exec_command to a streaming channel to avoid losing the order of stdout and stderr
+        stdout, stderr = (stdout.read(), stderr.read())
+        if stdout:
+            self.logger.debug("got stdout from restart command: %s", stdout.strip())
+        if stderr:
+            self.logger.debug("got stderr from restart command: %s", stderr.strip())
+
+
+    def check_services(self):
+        for port in self.ports:
+            if not self.check_port(port):
+                try:
+                    service_name = services[port]
+                except KeyError:
+                    self.logger.error("port {0} is down, but I don't know how to restart it. Add to my services dict".format(port))
+                    continue
+
+                if not self.noop:
+                    self.restart_service(service_name)
+
+
+
+def get_args():
+    """
+    Parses args from the command line
+    """
+    parser = argparse.ArgumentParser(description='Test and restart services')
+    parser.add_argument('-p', '--ports', action=CommaSeperatedListOfInt,
+                        default=set(), help="comma seperated list of ports")
+    parser.add_argument('-i', '--ip', help="ip address to run against")
+    parser.add_argument('-l', '--log-file', metavar="FILE", default="./supervisor.log", help="log to FILE")
+    parser.add_argument('-n', '--noop', action="store_true", default=False,
+                        help="only check services, do not restat")
+    parser.add_argument('-d', '--debug', action="store_true", default=False,
+                        help="enable debug logging")
+
+    return parser.parse_args()
+
+def get_user_input(args):
+    """
+    Gets input from stdin, prompting if stdin is a terminal
+    """
+    if os.isatty(sys.stdin.fileno()):
+        ip_prompt = "Enter an IP address: "
+        port_prompt = "Enter a comma seperated list of ports: "
+    else:
+        ip_prompt = ""
+        port_prompt = ""
+
+    try:
+        if not args.ip:
+            args.ip = raw_input(ip_prompt)
+            if not args.ip:
+                raise SystemExit("an ip address must be provided")
+
+        if not args.ports:
+            try:
+                args.ports = set(int(x) for x in raw_input(port_prompt).split(','))
+            except ValueError:
+                raise SystemExit("you must provide at least one port and it must be an integer")
+
+    except KeyboardInterrupt:
+        # use an empty string for a single newline after the prompt
+        raise SystemExit("")
+
+def setup_logging(logfile, debug):
+    """
+    Configure logging to go to both a file and stdout
+    """
+    logFormatter = logging.Formatter("%(asctime)s [%(levelname)-5.5s]  %(message)s")
+    rootLogger = logging.getLogger(__name__)
+
+    fileHandler = logging.FileHandler("{0}".format(logfile))
+    fileHandler.setFormatter(logFormatter)
+    rootLogger.addHandler(fileHandler)
+
+    consoleHandler = logging.StreamHandler(sys.stdout)
+    consoleHandler.setFormatter(logFormatter)
+    rootLogger.addHandler(consoleHandler)
+
+    if debug:
+        rootLogger.setLevel(logging.DEBUG)
+    else:
+        rootLogger.setLevel(logging.INFO)
+
+    return rootLogger
+
+def main():
+    args = get_args()
+    get_user_input(args)
+    logger = setup_logging(args.log_file, args.debug)
+    supervisor = PortSupervisor(args.ip, args.ports, args.noop, logger)
+    supervisor.check_services()
+
+
+if __name__ == '__main__':
+    main()

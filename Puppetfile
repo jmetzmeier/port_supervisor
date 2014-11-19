@@ -1,0 +1,6 @@
+mod 'puppetlabs/apache'
+mod 'puppetlabs/stdlib'
+mod 'puppetlabs/concat'
+mod 'thomasvandoren/redis'
+mod 'maestrodev/wget'
+mod 'puppetlabs/gcc'

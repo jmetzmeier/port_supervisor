@@ -5,16 +5,7 @@ import paramiko
 import argparse
 import logging
 import socket
-
-# port: service name
-# TODO: find a more elegant way to do this (puppet facts?)
-services = {
-    80: "apache2",
-    631: "cups",
-    3306: "mysql",
-    6379: "redis-server",
-    25: "exim4"
-}
+import ConfigParser
 
 class CommaSeperatedListOfInt(argparse.Action):
     """
@@ -28,11 +19,13 @@ class CommaSeperatedListOfInt(argparse.Action):
             getattr(namespace, self.dest).add(int(opt))
 
 class PortSupervisor(object):
-    def __init__(self, ip, ports, noop, logger):
+    def __init__(self, ip, ports, noop, logger, config, ssh_opts):
         self.ip = ip
         self.ports = ports
         self.noop = noop
         self.logger = logger
+        self.config = config
+        self.ssh_opts = ssh_opts
 
     def check_port(self, port):
         """
@@ -63,11 +56,16 @@ class PortSupervisor(object):
         ssh = paramiko.client.SSHClient()
         ssh.load_system_host_keys()
         ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
-        # TODO: support alternate user
-        ssh.connect(self.ip, username='root')
+        command = ['service', service_name, 'restart']
+
+        if self.ssh_opts.get('user') != 'root':
+            command.insert(0, 'sudo')
+
+        ssh.connect(self.ip, port=self.ssh_opts.get('port'),
+                    username=self.ssh_opts.get('user'), key_filename=self.ssh_opts.get('keyfile'))
         self.logger.info("attempting to restart service %s", service_name)
         try:
-            stdin, stdout, stderr = ssh.exec_command('service {0} restart'.format(service_name))
+            stdin, stdout, stderr = ssh.exec_command(" ".join(command))
         except paramiko.SSHException:
             self.logger.error("failed to restart {0}".format(service_name))
 
@@ -85,9 +83,9 @@ class PortSupervisor(object):
         for port in self.ports:
             if not self.check_port(port):
                 try:
-                    service_name = services[port]
-                except KeyError:
-                    self.logger.error("port {0} is down, but I don't know how to restart it. Add to my services dict".format(port))
+                    service_name = self.config.get('services', str(port))
+                except (ConfigParser.NoOptionError):
+                    self.logger.error("port {0} is down, but I don't know how to restart it. Add to my services config".format(port))
                     continue
 
                 if not self.noop:
@@ -108,6 +106,11 @@ def get_args():
                         help="only check services, do not restat")
     parser.add_argument('-d', '--debug', action="store_true", default=False,
                         help="enable debug logging")
+    parser.add_argument('--ssh-keyfile', metavar="KEYFILE", help="use ssh key file KEYFILE.")
+    parser.add_argument('--ssh-user', metavar="USER", default="root", help="login to ssh as USER. Default: root")
+    parser.add_argument('--ssh-port', metavar="PORT", type=int, default=22, help="login to ssh via PORT. Default: 22")
+    parser.add_argument('-c', '--config', metavar="FILE", default="port_supervisor.conf",
+                        help="config file to use for services. Default: port_supervisor.conf")
 
     return parser.parse_args()
 
@@ -160,11 +163,24 @@ def setup_logging(logfile, debug):
 
     return rootLogger
 
+def read_config(config_file):
+    config = ConfigParser.RawConfigParser()
+    try:
+        config.read(config_file)
+    except ConfigParser.Error:
+        raise SystemExit("Failed to read config file {0}".format(config_file))
+
+    return config
+
 def main():
     args = get_args()
     get_user_input(args)
     logger = setup_logging(args.log_file, args.debug)
-    supervisor = PortSupervisor(args.ip, args.ports, args.noop, logger)
+    config = read_config(args.config)
+    supervisor = PortSupervisor(args.ip, args.ports, args.noop, logger, config, {
+            "user": args.ssh_user,
+            "port": args.ssh_port,
+            "keyfile": args.ssh_keyfile})
     supervisor.check_services()
 
 

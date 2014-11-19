@@ -28,5 +28,28 @@ Using stdin:
 ## Logging output
 By default port_supervisor will log data to ./port_supervisor.log. Use `--help` to see a full list of options
 
+## Configuration
+port_supervisor uses a simple INI file for configuration. The format is <port>=<service_name>.
 
+```
+[services]
+80=apache2
+```
+
+
+## Using vagrant
+A Vagrantfile is included for testing the script. It provisions via puppet and runs apache and redis by default. Use the following to setup the image:
+
+```
+r10k puppetfile install
+vagrant up
+```
+
+You can then test port_supervisor against the image:
+
+```
+vagrant ssh -c 'sudo service apache2 stop'
+./port_supervisor -i 192.168.33.10 -p 80,6379 --ssh-user vagrant \
+--ssh-keyfile "$(vagrant ssh-config | awk '/IdentityFile/ { print $NF }')"
+```
 
